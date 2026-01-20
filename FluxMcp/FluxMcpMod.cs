@@ -6,6 +6,7 @@ using ResoniteModLoader;
 using System.Threading;
 using NetfxMcp;
 using FluxMcp.Tools;
+using FrooxEngine;
 
 
 
@@ -128,7 +129,7 @@ public partial class FluxMcpMod : ResoniteMod
     /// <inheritdoc />
     public override void OnEngineInit()
     {
-        Init(this);
+        Engine.Current.OnReady += () => Init(this);
     }
 
     ~FluxMcpMod()

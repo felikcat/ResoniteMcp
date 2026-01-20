@@ -178,6 +178,7 @@ namespace FrooxEngine
         public float3 GlobalScale { get; set; }
         public string Tag { get; set; } = string.Empty;
         public System.Collections.Generic.List<Component> Components { get; } = new();
+        public event System.Action<Slot>? ChildAdded;
         public Slot AddSlot(string name) => new Slot { Name = name, Parent = this, World = World };
         public System.Collections.Generic.IEnumerable<Slot> GetChildrenWithTag(string tag) => System.Linq.Enumerable.Empty<Slot>();
         public void RunSynchronously(System.Action action)
@@ -235,6 +236,7 @@ namespace FrooxEngine
     {
         public static Engine Current { get; } = new Engine();
         public WorldManager WorldManager { get; } = new WorldManager();
+        public event System.Action? OnReady;
     }
 
     public static class WorkerInitializer

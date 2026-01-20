@@ -15,6 +15,18 @@
       <HintPath>$(ResonitePath)Elements.Core.dll</HintPath>
       <Private>$(ResoniteAssemblyPrivate)</Private>
     </Reference>
+    <Reference Include="Elements.Assets">
+      <HintPath>$(ResonitePath)Elements.Assets.dll</HintPath>
+      <Private>$(ResoniteAssemblyPrivate)</Private>
+    </Reference>
+    <Reference Include="SkyFrost.Base.Models">
+      <HintPath>$(ResonitePath)SkyFrost.Base.Models.dll</HintPath>
+      <Private>$(ResoniteAssemblyPrivate)</Private>
+    </Reference>
+    <Reference Include="SkyFrost.Base">
+      <HintPath>$(ResonitePath)SkyFrost.Base.dll</HintPath>
+      <Private>$(ResoniteAssemblyPrivate)</Private>
+    </Reference>
     <Reference Include="ResoniteModLoader">
       <HintPath>$(ResonitePath)Libraries/ResoniteModLoader.dll</HintPath>
       <Private>$(ResoniteAssemblyPrivate)</Private>

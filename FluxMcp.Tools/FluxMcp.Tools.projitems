@@ -15,6 +15,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)NodeSerialization.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)NodeToolHelpers.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)NodeValueTools.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)SlotTools.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ComponentTools.cs" />
   </ItemGroup>
 </Project>

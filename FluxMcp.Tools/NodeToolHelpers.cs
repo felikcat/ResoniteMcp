@@ -6,7 +6,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
-using Microsoft.Extensions.AI;
 
 namespace FluxMcp.Tools;
 
@@ -84,7 +83,7 @@ public static class NodeToolHelpers
         }
         catch (Exception ex)
         {
-            return new ErrorContent(ex.Message);
+            return $"Error: {ex.Message}";
         }
     }
 
@@ -105,7 +104,7 @@ public static class NodeToolHelpers
         }
         catch (Exception ex)
         {
-            return new ErrorContent(ex.Message);
+            return $"Error: {ex.Message}";
         }
     }
 
@@ -115,37 +114,30 @@ public static class NodeToolHelpers
     }
 
 
-    private static AIContent ToAIContent(object? item)
+    private static string ToContentString(object? item)
     {
-        if (item is AIContent ai)
+        if (item is string s)
         {
-            return ai;
-        }
-        else if (item is string s)
-        {
-            return new TextContent(s);
+            return s;
         }
         else if (item is IWorldElement worldElement)
         {
-            var json = JsonSerializer.Serialize<IWorldElement>(worldElement, JsonOptions);
-            return new TextContent(json);
+            return JsonSerializer.Serialize<IWorldElement>(worldElement, JsonOptions);
         }
 
-        return new TextContent(JsonSerializer.Serialize(item, JsonOptions));
+        return JsonSerializer.Serialize(item, JsonOptions);
     }
-
-    private static AIContent ToContent(object? item) => ToAIContent(item);
 
     private static object MapResult(object? result)
     {
         if (result is System.Collections.IEnumerable seq && result is not string)
         {
             return seq.Cast<object?>()
-                .Select(ToContent)
+                .Select(ToContentString)
                 .ToList();
         }
 
-        return ToAIContent(result);
+        return ToContentString(result);
     }
 
     internal static string CleanTypeName(string name)
