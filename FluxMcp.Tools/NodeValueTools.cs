@@ -3,6 +3,7 @@ using ModelContextProtocol.Server;
 using System;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Elements.Core;
 
@@ -37,10 +38,10 @@ public static class NodeValueTools
     /// Sets the value of a ProtoFlux input node with automatic type conversion.
     /// </summary>
     /// <param name="nodeRefId">The RefID of the input node to modify.</param>
-    /// <param name="value">The new value to set, as a JSON element.</param>
+    /// <param name="value">The new value to set, as a JSON string.</param>
     /// <returns>A task that represents the asynchronous operation, containing the set value or null if an error occurs.</returns>
-    [McpServerTool(Name = "setInputNodeValue"), Description("Sets the value of an input node. Automatically handles type conversion for basic types like float, int, bool, and vectors. Use this to configure input nodes with specific values.")]
-    public static async Task<object?> SetInputNodeValue(string nodeRefId, JsonElement value)
+    [McpServerTool(Name = "setInputNodeValue"), Description("Sets the value of an input node. Automatically handles type conversion for basic types like float, int, bool, and vectors. Use this to configure input nodes with specific values. Value must be a valid JSON string.")]
+    public static async Task<object?> SetInputNodeValue(string nodeRefId, string value)
     {
         return await NodeToolHelpers.HandleAsync(async () =>
         {
@@ -53,15 +54,30 @@ public static class NodeValueTools
                 }
                 var targetType = inputNode.InputType();
 
+                JsonNode? jsonValue;
                 try
                 {
-                    if (targetType == typeof(colorX) && !value.TryGetProperty("profile", out var _))
+                    jsonValue = JsonNode.Parse(value);
+                }
+                catch (JsonException)
+                {
+                     // Fallback: treat string as a string literal if it fails parsing? 
+                     // Or just wrap it if target is string?
+                     // For now, let's assume it MUST be valid JSON.
+                     throw new ArgumentException("Value must be a valid JSON string.");
+                }
+
+                if (jsonValue == null) throw new ArgumentNullException(nameof(value), "JSON value cannot be null");
+
+                try
+                {
+                    if (targetType == typeof(colorX) && jsonValue is JsonObject jo && !jo.ContainsKey("profile"))
                     {
-                        inputNode.BoxedValue = (colorX)value.Deserialize<color>(NodeToolHelpers.JsonOptions);
+                        inputNode.BoxedValue = (colorX)jsonValue.Deserialize<color>(NodeToolHelpers.JsonOptions);
                     }
                     else
                     {
-                        inputNode.BoxedValue = value.Deserialize(targetType, NodeToolHelpers.JsonOptions)!;
+                        inputNode.BoxedValue = jsonValue.Deserialize(targetType, NodeToolHelpers.JsonOptions)!;
                     }
                 }
                 catch (InvalidCastException)

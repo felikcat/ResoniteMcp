@@ -1,6 +1,8 @@
 using ModelContextProtocol.Protocol;
 using System;
+using System.Collections.Concurrent;
 using System.IO.Pipelines;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -10,120 +12,24 @@ using System.Threading.Tasks;
 namespace NetfxMcp;
 
 /// <summary>
-/// Stateless HTTP server transport implementation for Model Context Protocol communication.
+/// Server transport implementation for Model Context Protocol communication using SSE and POST.
 /// </summary>
 public sealed class StatelessHttpServerTransport : ITransport
 {
-    internal sealed class PostTransport : ITransport
-    {
-        private readonly Channel<JsonRpcMessage> _messages = Channel.CreateBounded<JsonRpcMessage>(new BoundedChannelOptions(1)
-        {
-            SingleReader = false,
-            SingleWriter = true,
-        });
-
-        private readonly IDuplexPipe _httpBodies;
-        private readonly StatelessHttpServerTransport _parentTransport;
-        private RequestId _pendingRequest;
-        private readonly byte[] _messageEventPrefix = Encoding.UTF8.GetBytes("event: message\r\ndata: ");
-        private readonly byte[] _messageEventSuffix = Encoding.UTF8.GetBytes("\r\n\r\n");
-
-        public PostTransport(StatelessHttpServerTransport parentTransport, IDuplexPipe httpBodies)
-        {
-            _httpBodies = httpBodies;
-            _parentTransport = parentTransport;
-        }
-
-        public async ValueTask<bool> RunAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                var message = await JsonSerializer.DeserializeAsync<JsonRpcMessage>(_httpBodies.Input.AsStream(), cancellationToken: cancellationToken).ConfigureAwait(false);
-                await OnMessageReceivedAsync(message, cancellationToken).ConfigureAwait(false);
-
-                if (_pendingRequest.Id is null)
-                {
-                    return false;
-                }
-
-                var channel = _messages.Reader;
-                bool done = false;
-
-                while (await channel.WaitToReadAsync(cancellationToken).ConfigureAwait(false) && !done)
-                {
-                    while (channel.TryRead(out var queuedMessage))
-                    {
-                        await _httpBodies.Output.WriteAsync(_messageEventPrefix, cancellationToken).ConfigureAwait(false);
-                        await JsonSerializer.SerializeAsync(_httpBodies.Output.AsStream(), queuedMessage, cancellationToken: cancellationToken).ConfigureAwait(false);
-                        await _httpBodies.Output.WriteAsync(_messageEventSuffix, cancellationToken).ConfigureAwait(false);
-
-                        if (queuedMessage is JsonRpcMessageWithId response && response.Id == _pendingRequest)
-                        {
-                            done = true;
-                            break;
-                        }
-                    }
-                }
-
-                return true;
-            }
-            catch (OperationCanceledException)
-            {
-                // Operation was cancelled, just exit gracefully.
-                return false;
-            }
-        }
-
-        public async Task SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken = default)
-        {
-            if (message is JsonRpcRequest)
-            {
-                throw new InvalidOperationException("Server to client requests are not supported in stateless mode.");
-            }
-
-            await _messages.Writer.WriteAsync(message, cancellationToken).ConfigureAwait(false);
-        }
-
-
-        private async ValueTask OnMessageReceivedAsync(JsonRpcMessage? message, CancellationToken cancellationToken)
-        {
-            if (message is null)
-            {
-                throw new InvalidOperationException("Received invalid null message.");
-            }
-
-            if (message is JsonRpcRequest request)
-            {
-                _pendingRequest = request.Id;
-
-                if (request.Method == RequestMethods.Initialize)
-                {
-                    _parentTransport.InitializeRequest = JsonSerializer.Deserialize<InitializeRequestParams?>(request.Params);
-                }
-            }
-
-            message.RelatedTransport = this;
-
-            await _parentTransport.MessageWriter.WriteAsync(message, cancellationToken).ConfigureAwait(false);
-        }
-
-        public ChannelReader<JsonRpcMessage> MessageReader => throw new NotSupportedException("JsonRpcMessage.RelatedTransport should only be used for sending messages.");
-
-        public ValueTask DisposeAsync()
-        {
-            return default;
-        }
-
-    }
-
     private readonly CancellationTokenSource _disposeCts = new();
-    private readonly Channel<JsonRpcMessage> _incomingChannel = Channel.CreateBounded<JsonRpcMessage>(new BoundedChannelOptions(1)
+    private readonly Channel<JsonRpcMessage> _incomingChannel = Channel.CreateBounded<JsonRpcMessage>(new BoundedChannelOptions(20)
     {
         SingleReader = true,
         SingleWriter = false,
     });
 
-    private ChannelWriter<JsonRpcMessage> MessageWriter => _incomingChannel.Writer;
+    // Store active SSE clients
+    private readonly ConcurrentDictionary<Guid, Channel<JsonRpcMessage>> _sseClients = new();
+
+    private readonly byte[] _messageEventPrefix = Encoding.UTF8.GetBytes("event: message\r\ndata: ");
+    private readonly byte[] _messageEventSuffix = Encoding.UTF8.GetBytes("\r\n\r\n");
+    private readonly byte[] _endpointEventPrefix = Encoding.UTF8.GetBytes("event: endpoint\r\ndata: ");
+    private readonly byte[] _newline = Encoding.UTF8.GetBytes("\r\n\r\n");
 
     /// <summary>
     /// Gets the channel reader for receiving JSON-RPC messages.
@@ -136,45 +42,94 @@ public sealed class StatelessHttpServerTransport : ITransport
     public InitializeRequestParams? InitializeRequest { get; private set; }
 
     /// <summary>
-    /// Handles an incoming HTTP POST request containing a JSON-RPC message.
+    /// Handles a new SSE connection.
     /// </summary>
-    /// <param name="httpBodies">The HTTP request and response body pipes.</param>
-    /// <param name="cancellationToken">A cancellation token to cancel the operation.</param>
-    /// <returns>A task that represents the asynchronous operation. The task result indicates whether the operation completed successfully.</returns>
-    public async Task<bool> HandlePostRequest(IDuplexPipe httpBodies, CancellationToken cancellationToken)
+    public async Task HandleSseConnection(IDuplexPipe connection, string endpointUri, CancellationToken cancellationToken)
     {
-        using var postCts = CancellationTokenSource.CreateLinkedTokenSource(_disposeCts.Token, cancellationToken);
-        var postTransport = new PostTransport(this, httpBodies);
+        var clientId = Guid.NewGuid();
+        var clientChannel = Channel.CreateBounded<JsonRpcMessage>(new BoundedChannelOptions(20) { SingleReader = true, SingleWriter = true });
+
+        _sseClients.TryAdd(clientId, clientChannel);
+
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_disposeCts.Token, cancellationToken);
+        var token = linkedCts.Token;
+
         try
         {
-            return await postTransport.RunAsync(postCts.Token).ConfigureAwait(false);
+            // Send 'endpoint' event so client knows where to POST
+            var endpointData = Encoding.UTF8.GetBytes(endpointUri);
+            await connection.Output.WriteAsync(_endpointEventPrefix, token).ConfigureAwait(false);
+            await connection.Output.WriteAsync(endpointData, token).ConfigureAwait(false);
+            await connection.Output.WriteAsync(_newline, token).ConfigureAwait(false);
+            await connection.Output.FlushAsync(token).ConfigureAwait(false);
+
+            while (!token.IsCancellationRequested)
+            {
+                var message = await clientChannel.Reader.ReadAsync(token).ConfigureAwait(false);
+
+                await connection.Output.WriteAsync(_messageEventPrefix, token).ConfigureAwait(false);
+                await JsonSerializer.SerializeAsync(connection.Output.AsStream(), message, cancellationToken: token).ConfigureAwait(false);
+                await connection.Output.WriteAsync(_newline, token).ConfigureAwait(false);
+                await connection.Output.FlushAsync(token).ConfigureAwait(false);
+            }
         }
+        catch (OperationCanceledException) { }
+        catch (Exception) { } // Client disconnected
         finally
         {
-            await postTransport.DisposeAsync().ConfigureAwait(false);
+            _sseClients.TryRemove(clientId, out _);
+        }
+    }
+
+    /// <summary>
+    /// Handles an incoming HTTP POST request containing a JSON-RPC message.
+    /// </summary>
+    public async Task HandlePostRequest(IDuplexPipe httpBodies, CancellationToken cancellationToken)
+    {
+        try
+        {
+             var message = await JsonSerializer.DeserializeAsync<JsonRpcMessage>(httpBodies.Input.AsStream(), cancellationToken: cancellationToken).ConfigureAwait(false);
+
+             if (message != null)
+             {
+                 if (message is JsonRpcRequest request && request.Method == RequestMethods.Initialize)
+                 {
+                     if (request.Params is not null)
+                        InitializeRequest = JsonSerializer.Deserialize<InitializeRequestParams>(request.Params);
+                 }
+
+                 await _incomingChannel.Writer.WriteAsync(message, cancellationToken).ConfigureAwait(false);
+             }
+        }
+        catch (Exception)
+        {
+            // Invalid message or other error
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Sends a JSON-RPC message asynchronously to all connected SSE clients.
+    /// </summary>
+    public async Task SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken = default)
+    {
+        foreach (var client in _sseClients.Values)
+        {
+            try 
+            {
+                 await client.Writer.WriteAsync(message, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ChannelClosedException) { }
         }
     }
 
     /// <summary>
     /// Disposes the transport asynchronously.
     /// </summary>
-    /// <returns>A value task that represents the asynchronous dispose operation.</returns>
     public ValueTask DisposeAsync()
     {
         _disposeCts.Cancel();
         _disposeCts.Dispose();
         return default;
-    }
-
-    /// <summary>
-    /// Sends a JSON-RPC message asynchronously. This operation is not supported in stateless mode.
-    /// </summary>
-    /// <param name="message">The JSON-RPC message to send.</param>
-    /// <param name="cancellationToken">A cancellation token to cancel the operation.</param>
-    /// <returns>A task that represents the asynchronous send operation.</returns>
-    /// <exception cref="InvalidOperationException">Always thrown as unsolicited server-to-client messages are not supported in stateless mode.</exception>
-    public Task SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken = default)
-    {
-        throw new InvalidOperationException("Unsolicited server to client messages are not supported in stateless mode.");
     }
 }

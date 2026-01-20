@@ -188,42 +188,49 @@ internal sealed class DuplexPipe : IDuplexPipe
                 var request = ctx.Request;
                 var response = ctx.Response;
 
-                if (request.HttpMethod != "POST")
-                {
-                    response.StatusCode = 405; // Method Not Allowed
-                    response.Close();
-                    return;
-                }
-                else if (request.Url?.AbsolutePath != "/mcp")
+                if (request.Url?.AbsolutePath != "/mcp")
                 {
                     response.StatusCode = 404; // Not Found
                     response.Close();
                     return;
                 }
 
-
-                // response.KeepAlive = false;
-                // response.SendChunked = true;
-                // response.StatusCode = 202; // Accepted
-                response.AddHeader("Content-Type", "text/event-stream");
-
-                _logger.LogDebug("Handling request: {Method} {Url}", request.HttpMethod, request.Url);
-                var duplexPipe = new DuplexPipe(PipeReader.Create(request.InputStream), PipeWriter.Create(response.OutputStream));
-                var bodyWritten = await _transport.HandlePostRequest(duplexPipe, cancellationToken).ConfigureAwait(false);
-                _logger.LogDebug("Request body written: {Written}", bodyWritten);
-                await response.OutputStream.FlushAsync(cancellationToken).ConfigureAwait(false);
-
-                try
+                if (request.HttpMethod == "GET") 
                 {
+                     response.AddHeader("Content-Type", "text/event-stream");
+                     response.AddHeader("Cache-Control", "no-cache");
+                     response.AddHeader("Connection", "keep-alive");
+                     
+                     // Keep connection open!
+                     // We pass the response output stream to the transport.
+                     var pipeWriter = PipeWriter.Create(response.OutputStream);
+                     var duplexPipe = new DuplexPipe(PipeReader.Create(System.IO.Stream.Null), pipeWriter);
+                     
+                     // We need to pass the endpoint URI that the client should POST to.
+                     // Assuming /mcp is the endpoint.
+                     var endpointUri = "/mcp";
+                     
+                     await _transport.HandleSseConnection(duplexPipe, endpointUri, cancellationToken).ConfigureAwait(false);
+                     
+                     // When HandleSseConnection returns, it means the connection is closed or cancelled.
+                     // We should close the response.
+                     try { response.Close(); } catch {}
+                     return;
+                }
+                else if (request.HttpMethod == "POST")
+                {
+                     var duplexPipe = new DuplexPipe(PipeReader.Create(request.InputStream), PipeWriter.Create(response.OutputStream));
+                     await _transport.HandlePostRequest(duplexPipe, cancellationToken).ConfigureAwait(false);
+                     
+                     response.StatusCode = 202; // Accepted
+                     response.Close();
+                     return;
+                }
+                else 
+                {
+                    response.StatusCode = 405; // Method Not Allowed
                     response.Close();
-                }
-                catch (HttpListenerException ex)
-                {
-                    _logger.LogWarning(ex, "Error closing response");
-                }
-                catch (ObjectDisposedException ex)
-                {
-                    _logger.LogWarning(ex, "Response already disposed");
+                    return;
                 }
             }
             catch (Exception ex)
