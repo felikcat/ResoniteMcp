@@ -110,17 +110,6 @@ namespace Elements.Core
         public static bool operator ==(colorX left, colorX right) => left.Equals(right);
         public static bool operator !=(colorX left, colorX right) => !left.Equals(right);
     }
-}
-
-namespace FrooxEngine
-{
-    using Elements.Core;
-
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1040:Avoid empty interfaces")]
-    public interface ISyncMember { }
-    public class DataTreeNode { }
-    public class LoadControl { }
-    public class SaveControl { }
 
     public readonly struct RefID : System.IEquatable<RefID>
     {
@@ -145,6 +134,17 @@ namespace FrooxEngine
         public static bool operator ==(RefID left, RefID right) => left.Equals(right);
         public static bool operator !=(RefID left, RefID right) => !left.Equals(right);
     }
+}
+
+namespace FrooxEngine
+{
+    using Elements.Core;
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1040:Avoid empty interfaces")]
+    public interface ISyncMember { }
+    public class DataTreeNode { }
+    public class LoadControl { }
+    public class SaveControl { }
 
     public interface IWorldElement
     {
@@ -158,6 +158,16 @@ namespace FrooxEngine
         public object? GetObjectOrNull(RefID id) => null;
     }
 
+    public class Component : IWorldElement
+    {
+        public RefID ReferenceID { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public IWorldElement? Parent { get; set; }
+        public bool Enabled { get; set; } = true;
+        public Slot Slot => (Slot)Parent!;
+        public void Destroy() { }
+    }
+
     public class Slot : IWorldElement
     {
         public RefID ReferenceID { get; set; }
@@ -167,6 +177,7 @@ namespace FrooxEngine
         public float3 LocalPosition { get; set; }
         public float3 GlobalScale { get; set; }
         public string Tag { get; set; } = string.Empty;
+        public System.Collections.Generic.List<Component> Components { get; } = new();
         public Slot AddSlot(string name) => new Slot { Name = name, Parent = this, World = World };
         public System.Collections.Generic.IEnumerable<Slot> GetChildrenWithTag(string tag) => System.Linq.Enumerable.Empty<Slot>();
         public void RunSynchronously(System.Action action)
@@ -175,7 +186,24 @@ namespace FrooxEngine
             action();
         }
         public void UnpackNodes() { }
-        public object AttachComponent(System.Type type) => new object();
+        public T AttachComponent<T>() where T : Component, new()
+        {
+             var c = new T { Parent = this };
+             Components.Add(c);
+             return c;
+        }
+        public Component AttachComponent(System.Type type)
+        {
+            if (typeof(Component).IsAssignableFrom(type))
+            {
+                 var c = (Component)System.Activator.CreateInstance(type)!;
+                 c.Parent = this;
+                 Components.Add(c);
+                 return c;
+            }
+            return new Component();
+        }
+        public void RemoveComponent(Component component) => Components.Remove(component);
         public void Destroy() { }
         public void PositionInFrontOfUser() { }
     }
@@ -239,13 +267,8 @@ namespace FrooxEngine.ProtoFlux
         System.Type InputType();
     }
 
-    public class ProtoFluxNode : IWorldElement
+    public class ProtoFluxNode : Component
     {
-        public RefID ReferenceID { get; set; }
-        public string Name { get; set; } = string.Empty;
-        public IWorldElement? Parent { get; set; }
-        public Slot Slot { get; } = new Slot();
-
         public int NodeInputCount => 0;
         public int NodeInputListCount => 0;
         public int NodeOutputCount => 0;

@@ -46,6 +46,27 @@ public static class NodeToolHelpers
         return await completionSource.Task.ConfigureAwait(false);
     }
 
+    [SuppressMessage("Design", "CA1031:Do not catch general exception types", Justification = "Error should be sent to client")]
+    internal static async Task<T> UpdateWorldAction<T>(Func<T> action)
+    {
+        var completionSource = new TaskCompletionSource<T>();
+
+        FocusedWorld.RunSynchronously(() =>
+        {
+            try
+            {
+                completionSource.SetResult(action());
+            }
+            catch (Exception ex)
+            {
+                ResoniteMod.Warn(ex);
+                completionSource.SetException(ex);
+            }
+        });
+
+        return await completionSource.Task.ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Executes a function and handles any exceptions, returning appropriate error content.
     /// </summary>
